@@ -25,7 +25,8 @@ import org.graylog2.gelfclient.transport.GelfUdpTransport;
  */
 public enum GelfTransports {
     TCP,
-    UDP;
+    UDP,
+    AMQP;
 
     /**
      * Creates a {@link GelfTransport} from the given protocol and configuration.

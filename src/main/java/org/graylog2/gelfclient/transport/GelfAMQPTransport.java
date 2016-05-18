@@ -20,16 +20,16 @@ public class GelfAMQPTransport implements GelfTransport {
 	public GelfAMQPTransport(GelfConfiguration config, BlockingQueue<GelfMessage> queue) {
 		this.config = config;
 		this.queue = queue;
-		startup();
+		start();
 	}
 
 	public GelfAMQPTransport(GelfConfiguration config) {
 		this.config = config;
 		this.queue = new LinkedBlockingQueue<GelfMessage>(config.getQueueSize());
-		startup();
+		start();
 	}
 
-	private void startup() {
+	private void start() {
 		//Startup the factory and set the options
 		factory = new ConnectionFactory();
 		//Set this to what it should be
@@ -46,14 +46,14 @@ public class GelfAMQPTransport implements GelfTransport {
 		
 	@Override
 	public void send(GelfMessage message) throws InterruptedException {
-		// TODO Auto-generated method stub
-		
+		LOG.debug("Sending message: {}", message.toString());
+        queue.put(message);
 	}
 
 	@Override
 	public boolean trySend(GelfMessage message) {
-		// TODO Auto-generated method stub
-		return false;
+		LOG.debug("Trying to send message: {}", message.toString());
+		return queue.offer(message);
 	}
 
 	@Override

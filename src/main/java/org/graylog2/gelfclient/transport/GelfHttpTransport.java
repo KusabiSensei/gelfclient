@@ -17,23 +17,36 @@
 package org.graylog2.gelfclient.transport;
 
 import io.netty.bootstrap.Bootstrap;
-import io.netty.buffer.ByteBuf;
+import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
+import io.netty.channel.ChannelPipeline;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.SimpleChannelInboundHandler;
+import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
+import io.netty.handler.codec.http.DefaultFullHttpRequest;
+import io.netty.handler.codec.http.HttpClientCodec;
+import io.netty.handler.codec.http.HttpHeaders;
+import io.netty.handler.codec.http.HttpMethod;
+import io.netty.handler.codec.http.HttpObject;
+import io.netty.handler.codec.http.HttpRequest;
+import io.netty.handler.codec.http.HttpResponse;
+import io.netty.handler.codec.http.HttpResponseStatus;
+import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.ssl.SslContext;
+import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import org.graylog2.gelfclient.GelfConfiguration;
 import org.graylog2.gelfclient.encoder.GelfMessageJsonEncoder;
 import org.graylog2.gelfclient.encoder.GelfTcpFrameDelimiterEncoder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import java.net.URI;
 
 /**
  * A {@link GelfTransport} implementation that uses HTTP to send GELF messages.
@@ -58,61 +71,38 @@ public class GelfHttpTransport extends AbstractGelfTransport {
 
         bootstrap.group(workerGroup)
                 .channel(NioSocketChannel.class)
-                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, config.getConnectTimeout())
-                .option(ChannelOption.TCP_NODELAY, config.isTcpNoDelay())
-                .option(ChannelOption.SO_KEEPALIVE, config.isTcpKeepAlive())
+                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, config.getConnectTimeout())             
                 .remoteAddress(config.getRemoteAddress())
                 .handler(new ChannelInitializer<SocketChannel>() {
-                    @Override
-                    protected void initChannel(SocketChannel ch) throws Exception {
-                        if (config.isTlsEnabled()) {
-                            LOG.debug("TLS enabled.");
-                            final SslContext sslContext;
 
-                            if (!config.isTlsCertVerificationEnabled()) {
-                                // If the cert should not be verified just use an insecure trust manager.
-                                LOG.debug("TLS certificate verification disabled!");
-                                sslContext = SslContext.newClientContext(InsecureTrustManagerFactory.INSTANCE);
-                            } else if (config.getTlsTrustCertChainFile() != null) {
-                                // If a cert chain file is set, use it.
-                                LOG.debug("TLS certificate chain file: {}", config.getTlsTrustCertChainFile());
-                                sslContext = SslContext.newClientContext(config.getTlsTrustCertChainFile());
-                            } else {
-                                // Otherwise use the JVM default cert chain.
-                                sslContext = SslContext.newClientContext();
-                            }
-
-                            ch.pipeline().addLast(sslContext.newHandler(ch.alloc()));
-                        }
-
-                        // The graylog2-server uses '\0'-bytes as delimiter for TCP frames.
-                        ch.pipeline().addLast(new GelfTcpFrameDelimiterEncoder());
-                        // We cannot use GZIP encoding for TCP because the headers contain '\0'-bytes then.
-                        ch.pipeline().addLast(new GelfMessageJsonEncoder());
-                        ch.pipeline().addLast(new SimpleChannelInboundHandler<ByteBuf>() {
-                            @Override
-                            protected void channelRead0(ChannelHandlerContext ctx, ByteBuf msg) throws Exception {
-                                // We do not receive data.
-                            }
-
-                            @Override
-                            public void channelActive(ChannelHandlerContext ctx) throws Exception {
-                                senderThread.start(ctx.channel());
-                            }
-
-                            @Override
-                            public void channelInactive(ChannelHandlerContext ctx) throws Exception {
-                                LOG.info("Channel disconnected!");
-                                senderThread.stop();
-                                scheduleReconnect(ctx.channel().eventLoop());
-                            }
-
-                            @Override
-                            public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
-                                LOG.error("Exception caught", cause);
-                            }
-                        });
-                    }
+					@Override
+					protected void initChannel(SocketChannel ch) throws Exception {
+						ChannelPipeline p = ch.pipeline();
+						
+						// Use the Netty HTTP codec
+						p.addLast(new HttpClientCodec());
+						
+						// Graylog doesn't return compressed responses so we are skipping the setup of a compression handler
+						// At least according to the Graylog documents ;)
+						
+						p.addLast(new SimpleChannelInboundHandler<HttpObject>() {
+							@Override
+							public void channelRead0(ChannelHandlerContext ctxt, HttpObject message) {
+								if(message instanceof HttpResponse) {
+									//Cast it
+									HttpResponse response = (HttpResponse) message;
+									
+									//The only thing we should get is a 202 Accepted.
+									//This means that the message was accepted for processing
+									if (response.getStatus() != HttpResponseStatus.ACCEPTED) {
+										//TODO: Graceful error handling, i.e. a retry or something
+										//Right now we do nothing
+									}
+								}
+							}
+						});
+					}
+                	
                 });
 
         if (config.getSendBufferSize() != -1) {

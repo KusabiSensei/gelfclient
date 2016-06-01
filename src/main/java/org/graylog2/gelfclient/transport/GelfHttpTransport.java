@@ -53,72 +53,89 @@ import java.net.URI;
  * <p>This class is thread-safe.</p>
  */
 public class GelfHttpTransport extends AbstractGelfTransport {
-    private static final Logger LOG = LoggerFactory.getLogger(GelfHttpTransport.class);
+	private static final Logger LOG = LoggerFactory.getLogger(GelfHttpTransport.class);
 
-    /**
-     * Creates a new HTTP GELF transport.
-     *
-     * @param config the GELF client configuration
-     */
-    public GelfHttpTransport(GelfConfiguration config) {
-        super(config);
-    }
+	/**
+	 * Creates a new HTTP GELF transport.
+	 *
+	 * @param config the GELF client configuration
+	 */
+	public GelfHttpTransport(GelfConfiguration config) {
+		super(config);
+	}
 
-    @Override
-    protected void createBootstrap(final EventLoopGroup workerGroup) {
-        final Bootstrap bootstrap = new Bootstrap();
-        final GelfSenderThread senderThread = new GelfSenderThread(queue);
+	@Override
+	protected void createBootstrap(final EventLoopGroup workerGroup) {
+		final Bootstrap bootstrap = new Bootstrap();
+		final GelfSenderThread senderThread = new GelfSenderThread(queue);
 
-        bootstrap.group(workerGroup)
-                .channel(NioSocketChannel.class)
-                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, config.getConnectTimeout())             
-                .remoteAddress(config.getRemoteAddress())
-                .handler(new ChannelInitializer<SocketChannel>() {
+		bootstrap.group(workerGroup)
+		.channel(NioSocketChannel.class)
+		.option(ChannelOption.CONNECT_TIMEOUT_MILLIS, config.getConnectTimeout())             
+		.remoteAddress(config.getRemoteAddress())
+		.handler(new ChannelInitializer<SocketChannel>() {
 
+			@Override
+			protected void initChannel(SocketChannel ch) throws Exception {
+				ChannelPipeline p = ch.pipeline();
+
+				// Turn the Gelf Message into JSON with Jackson
+				p.addLast(new GelfMessageJsonEncoder());
+				// Use the Netty HTTP codec to send it
+				p.addLast(new HttpClientCodec());
+				
+				// Graylog doesn't return compressed responses so we are skipping the setup of a compression handler
+				// At least according to the Graylog documents ;)
+
+				p.addLast(new SimpleChannelInboundHandler<HttpObject>() {
 					@Override
-					protected void initChannel(SocketChannel ch) throws Exception {
-						ChannelPipeline p = ch.pipeline();
-						
-						// Use the Netty HTTP codec
-						p.addLast(new HttpClientCodec());
-						
-						// Graylog doesn't return compressed responses so we are skipping the setup of a compression handler
-						// At least according to the Graylog documents ;)
-						
-						p.addLast(new SimpleChannelInboundHandler<HttpObject>() {
-							@Override
-							public void channelRead0(ChannelHandlerContext ctxt, HttpObject message) {
-								if(message instanceof HttpResponse) {
-									//Cast it
-									HttpResponse response = (HttpResponse) message;
-									
-									//The only thing we should get is a 202 Accepted.
-									//This means that the message was accepted for processing
-									if (response.getStatus() != HttpResponseStatus.ACCEPTED) {
-										//TODO: Graceful error handling, i.e. a retry or something
-										//Right now we do nothing
-									}
-								}
+					public void channelRead0(ChannelHandlerContext ctx, HttpObject message) {
+						if(message instanceof HttpResponse) {
+							//Cast it
+							HttpResponse response = (HttpResponse) message;
+							//The only thing we should get is a 202 Accepted.
+							//This means that the message was accepted for processing
+							if (response.getStatus() != HttpResponseStatus.ACCEPTED) {
+								//TODO: Graceful error handling, i.e. a retry or something
 							}
-						});
+						}
 					}
-                	
-                });
+					
+					@Override
+                    public void channelActive(ChannelHandlerContext ctx) throws Exception {
+                        senderThread.start(ctx.channel());
+                    }
 
-        if (config.getSendBufferSize() != -1) {
-            bootstrap.option(ChannelOption.SO_SNDBUF, config.getSendBufferSize());
-        }
+                    @Override
+                    public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+                        LOG.info("Channel disconnected!");
+                        senderThread.stop();
+                        scheduleReconnect(ctx.channel().eventLoop());
+                    }
 
-        bootstrap.connect().addListener(new ChannelFutureListener() {
-            @Override
-            public void operationComplete(ChannelFuture future) throws Exception {
-                if (future.isSuccess()) {
-                    LOG.debug("Connected!");
-                } else {
-                    LOG.error("Connection failed: {}", future.cause().getMessage());
-                    scheduleReconnect(future.channel().eventLoop());
-                }
-            }
-        });
-    }
+                    @Override
+                    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+                        LOG.error("Exception caught", cause);
+                    }
+					
+				});
+			}
+		});
+
+		if (config.getSendBufferSize() != -1) {
+			bootstrap.option(ChannelOption.SO_SNDBUF, config.getSendBufferSize());
+		}
+
+		bootstrap.connect().addListener(new ChannelFutureListener() {
+			@Override
+			public void operationComplete(ChannelFuture future) throws Exception {
+				if (future.isSuccess()) {
+					LOG.debug("Connected!");
+				} else {
+					LOG.error("Connection failed: {}", future.cause().getMessage());
+					scheduleReconnect(future.channel().eventLoop());
+				}
+			}
+		});
+	}
 }
